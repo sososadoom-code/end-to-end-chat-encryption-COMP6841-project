@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Secure Chat — COMP6841</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="auth-screen">
+  <div class="auth-card">
+    <div class="brand">COMP6841 · SECURE CHAT</div>
+    <h1 id="form-title">Log in</h1>
+
+    <div class="auth-error" id="error"></div>
+
+    <label for="username">Username</label>
+    <input id="username" type="text" autocomplete="username" />
+
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password" />
+
+    <button id="submit-btn" onclick="submitForm()">LOG IN</button>
+
+    <div class="toggle">
+      <span id="toggle-text">Don't have an account?</span>
+      <a id="toggle-link" onclick="toggleMode()">Register</a>
+    </div>
+  </div>
+</div>
+
+<script>
+  let mode = "login"; // or "register"
+
+  function toggleMode() {
+    mode = mode === "login" ? "register" : "login";
+    document.getElementById("form-title").textContent = mode === "login" ? "Log in" : "Register";
+    document.getElementById("submit-btn").textContent = mode === "login" ? "LOG IN" : "CREATE ACCOUNT";
+    document.getElementById("toggle-text").textContent = mode === "login" ? "Don't have an account?" : "Already have an account?";
+    document.getElementById("toggle-link").textContent = mode === "login" ? "Register" : "Log in";
+    document.getElementById("error").textContent = "";
+  }
+
+  async function submitForm() {
+    const username = document.getElementById("username").value.trim();
+    const password = document.getElementById("password").value;
+    const errorBox = document.getElementById("error");
+    errorBox.textContent = "";
+
+    if (!username || !password) {
+      errorBox.textContent = "Enter a username and password.";
+      return;
+    }
+
+    const endpoint = mode === "login" ? "/api/login" : "/api/register";
+
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        errorBox.textContent = data.error || "Something went wrong.";
+        return;
+      }
+
+      if (mode === "register") {
+        errorBox.style.color = "var(--accent)";
+        errorBox.textContent = "Account created — log in now.";
+        errorBox.style.color = "";
+        toggleMode();
+        return;
+      }
+
+      // login succeeded
+      sessionStorage.setItem("token", data.token);
+      sessionStorage.setItem("username", data.username);
+      window.location.href = "chat.html";
+    } catch (err) {
+      errorBox.textContent = "Could not reach the server. Is server.py running?";
+    }
+  }
+
+  document.getElementById("password").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitForm();
+  });
+</script>
+
+</body>
+</html>
