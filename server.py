@@ -50,9 +50,11 @@ def save_messages(messages: list[dict]) -> None:
     MESSAGES_FILE.write_text(json.dumps(messages, indent=2))
 
 
-def append_message(sender: str, recipient: str, text: str) -> None:
+def append_message(sender: str, recipient: str, ciphertext: str, iv: str) -> None:
     messages = load_messages()
-    messages.append({"from": sender, "to": recipient, "text": text, "time": time.time()})
+    messages.append({"from": sender, "to": recipient, 
+                     "ciphertext": ciphertext, "iv": iv,
+                     "time": time.time()})
     save_messages(messages)
 
 
@@ -147,8 +149,11 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
                 data = json.loads(msg.data)
-                if data.get("type") == "message":
+                msg_type = data.get("type")
+                if msg_type == "message":
                     await relay_message(username, data)
+                elif msg_type in ("pubkey", "session_key"):
+                    await relay_ephemeral(username, data)
     finally:
         if online.get(username) is ws:
             del online[username]
@@ -160,19 +165,30 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
 async def relay_message(sender: str, data: dict) -> None:
     recipient = data.get("to")
-    text = data.get("text", "")
+    ciphertext = data.get("ciphertext", "")
+    iv = data.get("iv", "")
     target_ws = online.get(recipient)
 
-    log.info(f"relaying message from {sender} to {recipient}: {text}")
-    append_message(sender, recipient, text)
+    log.info(f"relaying message from {sender} to {recipient}: {ciphertext}")
+    append_message(sender, recipient, ciphertext, iv)
 
     if target_ws is not None:
-        await target_ws.send_json({"type": "message", "from": sender, "to": recipient, "text": text})
+        await target_ws.send_json({
+            "type": "message", "from": sender, "to": recipient, 
+            "ciphertext": ciphertext, "iv": iv})
     else:
         sender_ws = online.get(sender)
         if sender_ws is not None:
             await sender_ws.send_json({"type": "system", "message": f"{recipient} is not online right now, but they'll see it once they log in."})
 
+async def relay_ephemeral(sender: str, data: dict) -> None:
+    """Relays pubkey/session_key handshake messages. Blind relay - the server
+    does not (and at this layer, cannot) verify these belong to who they claim."""
+    recipient = data.get("to")
+    target_ws = online.get(recipient)
+    if target_ws is not None:
+        data["from"] = sender
+        await target_ws.send_json(data)
 
 async def broadcast_user_list() -> None:
     payload = {"type": "user_list", "users": list(online.keys())}

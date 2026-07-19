@@ -25,8 +25,9 @@
   <div class="chat-column">
     <header>
       <div class="identity">
-        <div id="chat-header-name" style="font-weight:600; font-size:14px;">Select a contact</div>
-        <span class="phase-badge">PHASE 1 — NO ENCRYPTION</span>
+          <div id="chat-header-name" style="font-weight:600; font-size:14px;">Select a contact</div>
+          <span id="secure-status" style="font-family:'JetBrains Mono',monospace; font-size:11px; margin-left:10px;"></span>
+          <span class="phase-badge">PHASE 2 — ENCRYPTED, KEY EXCHANGE UNVERIFIED</span>
       </div>
     </header>
 
@@ -41,9 +42,10 @@
 </div>
 
 <footer>
-  Messages are relayed in plaintext right now — the server can read everything. This is the baseline before encryption is added in Phase 2/3.
+  Messages are now encrypted (RSA key exchange + AES-GCM). The server only ever sees ciphertext. But this key exchange isn't verified yet 
 </footer>
 
+<script src="crypto.js"></script>
 <script src="chat.js"></script>
 
 </body>
