@@ -62,6 +62,44 @@ def history_for(username: str) -> list[dict]:
     messages = load_messages()
     return [m for m in messages if m["from"] == username or m["to"] == username]
 
+# key transparency log
+MERKLE_LOG_FILE = BASE_DIR / "merkle_log.json"
+
+def load_merkle_log() -> list[dict]:
+    if MERKLE_LOG_FILE.exists():
+        return json.loads(MERKLE_LOG_FILE.read_text())
+    return []
+
+def save_merkle_log(entries: list[dict]) -> None:
+    MERKLE_LOG_FILE.write_text(json.dumps(entries, indent=2))
+
+def leaf_hash(username: str, public_key_b64: str, timestamp: float) -> str:
+    return hashlib.sha256(f"{username}:{public_key_b64}:{timestamp}".encode()).hexdigest()
+
+def combine_hash(left_hex: str, right_hex: str) -> str:
+    return hashlib.sha256((left_hex + right_hex).encode()).hexdigest()
+
+def build_merkle_levels(leaves: list[str]) -> list[list[str]]:
+    if not leaves:
+        return [[hashlib.sha256(b"").hexdigest()]]
+    levels = [leaves[:]]
+    current = leaves[:]
+    while len(current) > 1:
+        if len(current) % 2 == 1:
+            current = current + [current[-1]]
+        current = [combine_hash(current[i], current[i + 1]) for i in range(0, len(current), 2)]
+        levels.append(current)
+    return levels
+
+def get_merkle_proof(levels: list[list[str]], leaf_index: int) -> list[dict]:
+    proof = []
+    index = leaf_index
+    for level in levels[:-1]:
+        padded = level if len(level) % 2 == 0 else level + [level[-1]]
+        sibling_index = index ^ 1
+        proof.append({"hash": padded[sibling_index], "isRight": sibling_index % 2 == 1})
+        index //= 2
+    return proof
 
 # password storage
 
@@ -125,6 +163,36 @@ async def login(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "token": token, "username": username})
 
 
+async def publish_key(request: web.Request) -> web.Response:
+    data = await request.json()
+    token = data.get("token", "")
+    username = sessions.get(token)
+    if not username:
+        return web.json_response({"error": "invalid token"}, status=401)
+    public_key = data.get("publicKey", "")
+    entries = load_merkle_log()
+    entries.append({"username": username, "publicKey": public_key, "time": time.time()})
+    save_merkle_log(entries)
+    log.info(f"published key to transparency log for {username} (log now has {len(entries)} entries)")
+    return web.json_response({"ok": True})
+
+async def key_proof(request: web.Request) -> web.Response:
+    username = request.query.get("username", "")
+    entries = load_merkle_log()
+    if not entries:
+        return web.json_response({"error": "log is empty"}, status=404)
+    matching_indices = [i for i, e in enumerate(entries) if e["username"] == username]
+    if not matching_indices:
+        return web.json_response({"error": "no key published for this user"}, status=404)
+    leaf_index = matching_indices[-1]
+    entry = entries[leaf_index]
+    leaves = [leaf_hash(e["username"], e["publicKey"], e["time"]) for e in entries]
+    levels = build_merkle_levels(leaves)
+    proof = get_merkle_proof(levels, leaf_index)
+    return web.json_response({
+        "publicKey": entry["publicKey"], "timestamp": entry["time"],
+        "proof": proof, "root": levels[-1][0], "treeSize": len(entries),
+    })
 # WebSocket chat relay
 
 async def ws_handler(request: web.Request) -> web.WebSocketResponse:
@@ -206,6 +274,8 @@ def create_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/api/register", register)
     app.router.add_post("/api/login", login)
+    app.router.add_post("/api/publish_key", publish_key)
+    app.router.add_get("/api/key_proof", key_proof)
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/", index)
     app.router.add_static("/", STATIC_DIR, show_index=False)

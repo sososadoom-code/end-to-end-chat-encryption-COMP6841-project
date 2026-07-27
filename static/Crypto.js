@@ -82,6 +82,34 @@ async function exportAESKeyBase64(key) {
 async function importAESKeyBase64(base64) {
   return crypto.subtle.importKey("raw", base64ToBuffer(base64), { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
 }
+
+async function getKeyFingerprint(publicKeyB64) {
+  const raw = base64ToBuffer(publicKeyB64);
+  const digest = await crypto.subtle.digest("SHA-256", raw);
+  const bytes = Array.from(new Uint8Array(digest)).slice(0, 10);
+  return bytes.map((b) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+}
+
+async function sha256Hex(str) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function merkleLeafHash(username, publicKeyB64, timestamp) {
+  return sha256Hex(`${username}:${publicKeyB64}:${timestamp}`);
+}
+
+async function merkleCombine(leftHex, rightHex) {
+  return sha256Hex(leftHex + rightHex);
+}
+
+async function verifyMerkleProof(leaf, proof, expectedRoot) {
+  let current = leaf;
+  for (const { hash, isRight } of proof) {
+    current = isRight ? await merkleCombine(current, hash) : await merkleCombine(hash, current);
+  }
+  return current === expectedRoot;
+}
  
 // ---------- message encryption ----------
 // AES-GCM needs a fresh random IV (12 bytes) per message. It is not secret -

