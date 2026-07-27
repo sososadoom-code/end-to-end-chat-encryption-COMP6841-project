@@ -2,7 +2,7 @@
 
 # how to run
 insall aiohttp cryptography 
-run server.py, then open http://localhost:8765.register 2 or more accounts to chat between each other.
+run server.py, then open http://localhost:8765 .register 2 or more accounts to chat between each other.
 
 # running the attack
 set MODE = "eavesdrop" for key substituin attack or MODE = "tamper" for tampering attack (it flips one bit of ciphertext)
